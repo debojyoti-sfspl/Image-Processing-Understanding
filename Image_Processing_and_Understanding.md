@@ -17,79 +17,84 @@ Existing images → vectorized → stored → searchable (RAG / dedup).
 ## 1. High-Level Architecture
 
 ```mermaid
----
-config:
-  layout: fixed
----
 flowchart TB
-    U["User / App"] -- Upload Image + Question --> API["FastAPI API Gateway"]
-    API --> VAL["Validation &amp; Security<br>(file type, size, EXIF, virus scan optional)"]
-    VAL --> OBJ[("Object Storage<br>S3/MinIO/Azure Blob")] & Q["Job Queue<br>Redis/Kafka/SQS"]
-    Q --> W["Processing Worker"]
-    W --> PRE["Preprocessing<br>rotate, resize, denoise, deskew"]
-    PRE --> OCR["OCR Extractor"] & CAP["Caption/Tags Extractor"] & EMB["Image Embedding Extractor"]
-    OCR --> META[("Postgres Metadata")] & LLM["Answer Generator<br>LLM or Vision LLM"]
-    CAP --> META & LLM
-    EMB --> VDB[("Vector DB<br>pgvector/Milvus/Pinecone/Weaviate")]
-    API -- Optional --> RETR["Retriever"]
-    RETR --> VDB & META & LLM
-    LLM --> API
-    API -- Answer + Evidence --> U
+  U[User / Client] -->|"Upload Image + Question"| API[API Gateway\nFastAPI]
+  API --> VAL[Validation\nType / Size / EXIF / Security]
+  VAL --> OBJ[(Object Storage\nS3 / MinIO / Azure Blob)]
+
+  VAL --> Q[Queue\nRedis / Kafka / SQS]
+  Q --> W[Processing Worker]
+
+  W --> PRE[Preprocessing\nRotate / Resize / Denoise / Deskew]
+  PRE --> OCR[OCR Extractor]
+  PRE --> CAP[Caption / Tags Extractor]
+  PRE --> EMB[Embedding Extractor]
+
+  OCR --> META[(Metadata DB\nPostgres)]
+  CAP --> META
+  EMB --> VDB[(Vector DB\npgvector / Milvus / Weaviate)]
+
+  API --> RETR[Retriever]
+  RETR --> VDB
+  RETR --> META
+
+  RETR --> GEN[Answer Generator\nLLM / Vision LLM]
+  OCR --> GEN
+  CAP --> GEN
+
+  GEN --> API -->|"Answer + Evidence"| U
 ```
 
-**Why this works**
-- Raw image stored once
-- Everything else is derived
-- Components replaceable independently
-- Enterprise‑safe and auditable
-
----
 
 ## 2. Use Case A — User Image → Answer
 
-### 2.1 Processing Pipeline
+### 2.1 Sequence diagram (runtime)
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant API
-    participant Storage
-    participant Worker
-    participant LLM
+  participant User
+  participant API as FastAPI
+  participant Store as Object Storage
+  participant Q as Queue
+  participant W as Worker
+  participant DB as Postgres
+  participant VDB as VectorDB
+  participant LLM as LLM/VLM
 
-    User->>API: Upload image
-    API->>Storage: Save raw image
-    API->>Worker: Trigger processing
-    Worker->>Worker: Preprocess + OCR + Caption
-    Worker->>Worker: Generate embeddings
-    Worker->>LLM: Send context + query
-    LLM->>User: Answer with evidence
+  User->>API: Upload image + question
+  API->>API: Validate (type/size/EXIF)
+  API->>Store: Save raw image
+  API->>Q: Enqueue processing job (image_id)
+
+  Q->>W: Job
+  W->>W: Preprocess image
+  W->>W: OCR + Caption + Embedding
+  W->>DB: Save text/caption/metadata
+  W->>VDB: Upsert embedding vector
+
+  API->>VDB: Retrieve similar items (optional)
+  API->>DB: Fetch OCR/caption evidence
+  API->>LLM: Ask with evidence + retrieval
+  LLM->>API: Answer + citations/evidence
+  API->>User: Final response
+
 ```
 
-### 2.2 Processing Stages
 
-| Stage | Action | Output |
-|-----|------|------|
-| Validate | Type, size, EXIF | Safe image |
-| Preprocess | Denoise, deskew | Clean image |
-| OCR | Text extraction | Text + layout |
-| Caption | Semantic summary | Tags + caption |
-| Embed | Vectorization | Image vector |
-| Retrieve | Similarity search | Context |
-| Answer | LLM reasoning | Final answer |
-
----
-
-## 3. OCR vs Vision LLM
+## 3. Use Case B — Existing Images → Vectorize (Batch indexing)
+### 3.1 Batch pipeline
 
 ```mermaid
-graph TD
-    A[Input Image] --> B{Contains Text?}
-    B -- Yes --> C[OCR]
-    B -- No --> D[Vision LLM]
-    C --> E[LLM Reasoning]
-    D --> E
-    E --> F[Answer]
+flowchart LR
+  SRC[Image Sources\nFolder/S3/Drive] --> PRE[Batch Preprocess]
+  PRE --> EMB[Embed Generator\nCLIP/OpenCLIP]
+  PRE --> CAP[Optional Captioning]
+  EMB --> VDB[(Vector DB)]
+  CAP --> DB[(Postgres Metadata)]
+  SRC --> OBJ[(Object Storage)]
+  DB --> API[Search API]
+  VDB --> API
+
 ```
 
 ---
@@ -104,96 +109,23 @@ flowchart LR
     E --> DB[(Vector DB)]
 ```
 
-### Stored Metadata
-
-| Field | Purpose |
-|----|----|
-| image_id | Unique ID |
-| storage_uri | Object path |
-| image_embedding | Similarity |
-| caption | Semantics |
-| caption_embedding | Text search |
-| ocr_text | Documents |
-| tags | JSON metadata |
-| tenant_id | Multi‑tenant |
-
----
-
-## 5. Tooling Landscape
-
-### OCR
-- Tesseract
-- EasyOCR
-- Google Document AI
-- AWS Textract
-
-### Vision & Captioning
-- Gemini Vision
-- OpenAI Vision
-- Open‑source caption models
-
-### Embeddings
-- CLIP / OpenCLIP
-- Azure Vision Embeddings
-
-### Vector Databases
-- pgvector (Postgres)
-- Pinecone
-- Weaviate
-- Milvus
-
----
-
-## 6. Cost Model
+## 5. Cost Breakdown
+### 5.3 A practical cost formula
 
 ```mermaid
-flowchart TB
-    OCR --> Cost
-    VLM --> Cost
-    Embeddings --> Cost
-    Storage --> Cost
-    Compute --> Cost
+flowchart TD
+    Monthly_Cost["Monthly Cost ≈"]
+    OCR["OCR_calls × OCR_unit_price"]
+    VLM["VLM_calls × avg_tokens × token_price"]
+    Embeddings["Embeddings_generated × embedding_unit_price_or_compute"]
+    VectorDB["VectorDB_storage + VectorDB_queries"]
+    Storage["Object_storage_GB_month"]
+    Compute["Compute_CPU/GPU_hours"]
+    
+    Monthly_Cost --> OCR
+    Monthly_Cost --> VLM
+    Monthly_Cost --> Embeddings
+    Monthly_Cost --> VectorDB
+    Monthly_Cost --> Storage
+    Monthly_Cost --> Compute
 ```
-
-**Cost Control Levers**
-- Cache OCR results
-- Embed once, reuse forever
-- Call Vision LLM only when needed
-
----
-
-## 7. V1 Architecture Blueprints
-
-### Low‑Cost / Self‑Hosted
-
-```mermaid
-graph LR
-    FastAPI --> OpenCV
-    OpenCV --> Tesseract
-    Tesseract --> OpenCLIP
-    OpenCLIP --> Postgres
-```
-
-### Enterprise Balanced
-
-```mermaid
-graph LR
-    FastAPI --> CloudOCR
-    CloudOCR --> VisionLLM
-    VisionLLM --> LocalEmbedding
-    LocalEmbedding --> Postgres
-```
-
----
-
-## 8. Deliverables
-
-- `/upload-image`
-- Async processing workers
-- `/ask-image`
-- `/search-image`
-- Logs, retries, metrics
-
----
-
-**Status:** Production‑ready documentation
