@@ -17,18 +17,24 @@ Existing images → vectorized → stored → searchable (RAG / dedup).
 ## 1. High-Level Architecture
 
 ```mermaid
-flowchart LR
-    U[User / System] --> API[FastAPI Upload API]
-    API --> S[Object Storage<br/>(S3 / MinIO)]
-    S --> W[Async Worker]
-    W --> P[Preprocessing]
-    P --> O[OCR Engine]
-    P --> C[Vision Caption Model]
-    C --> E[Embedding Model]
-    O --> DB[(Postgres + pgvector)]
-    E --> DB
-    DB --> LLM[LLM / VLM]
-    LLM --> A[Final Answer]
+---
+config:
+  layout: fixed
+---
+flowchart TB
+    U["User / App"] -- Upload Image + Question --> API["FastAPI API Gateway"]
+    API --> VAL["Validation &amp; Security<br>(file type, size, EXIF, virus scan optional)"]
+    VAL --> OBJ[("Object Storage<br>S3/MinIO/Azure Blob")] & Q["Job Queue<br>Redis/Kafka/SQS"]
+    Q --> W["Processing Worker"]
+    W --> PRE["Preprocessing<br>rotate, resize, denoise, deskew"]
+    PRE --> OCR["OCR Extractor"] & CAP["Caption/Tags Extractor"] & EMB["Image Embedding Extractor"]
+    OCR --> META[("Postgres Metadata")] & LLM["Answer Generator<br>LLM or Vision LLM"]
+    CAP --> META & LLM
+    EMB --> VDB[("Vector DB<br>pgvector/Milvus/Pinecone/Weaviate")]
+    API -- Optional --> RETR["Retriever"]
+    RETR --> VDB & META & LLM
+    LLM --> API
+    API -- Answer + Evidence --> U
 ```
 
 **Why this works**
